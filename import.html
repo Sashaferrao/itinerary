@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trip app</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#b3261e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Japan 2026">
+<style>
+:root{color-scheme:light dark;--red:#b3261e}
+body{margin:0;font:16px/1.5 -apple-system,system-ui,sans-serif;padding:max(20px,env(safe-area-inset-top)) 20px 40px;max-width:560px;margin-inline:auto}
+h1{font-size:22px;margin:0 0 4px}
+.card{border:1px solid #8884;border-radius:12px;padding:14px 16px;margin:14px 0}
+button,label.btn{display:inline-block;background:var(--red);color:#fff;border:0;border-radius:10px;padding:12px 16px;font-size:16px;margin:6px 6px 0 0}
+button.alt{background:none;color:inherit;border:1px solid #8886}
+input[type=file]{display:none}
+.msg{margin-top:10px;font-size:15px}
+.ok{color:#1b7a3a}.err{color:#b3261e}
+.mute{opacity:.7;font-size:14px}
+</style>
+</head>
+<body>
+<h1>Trip app</h1>
+<p class="mute">This page holds no trip details. Your itinerary is a separate file that stays on this phone.</p>
+
+<div class="card" id="loaded" hidden>
+  <strong>Trip file is on this phone.</strong>
+  <div><button id="open">Open my trip</button></div>
+</div>
+
+<div class="card">
+  <strong id="importTitle">Import your trip file</strong>
+  <p class="mute">Tap the button, then pick your trip file from Files (Downloads or iCloud Drive). It is read on this phone only and is never uploaded.</p>
+  <label class="btn" for="file">Choose trip file</label>
+  <input id="file" type="file">
+  <div class="msg" id="msg" aria-live="polite"></div>
+</div>
+
+<div class="card" id="removeCard" hidden>
+  <strong>Remove trip from this phone</strong>
+  <p class="mute">Deletes the imported itinerary from the app. Your trip file in Files is not affected.</p>
+  <button class="alt" id="remove">Remove trip</button>
+</div>
+
+<div class="card" id="swState"><span class="mute">Checking offline status...</span></div>
+
+<script>
+(function () {
+  var DB = 'trip-private', STORE = 'files';
+  function openDb() {
+    return new Promise(function (res, rej) {
+      var r = indexedDB.open(DB, 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore(STORE); };
+      r.onsuccess = function () { res(r.result); };
+      r.onerror = function () { rej(r.error); };
+    });
+  }
+  function count() {
+    return openDb().then(function (db) {
+      return new Promise(function (res) {
+        var q = db.transaction(STORE).objectStore(STORE).count();
+        q.onsuccess = function () { res(q.result); }; q.onerror = function () { res(0); };
+      });
+    }).catch(function () { return 0; });
+  }
+  function putAll(files) {
+    return openDb().then(function (db) {
+      return new Promise(function (res, rej) {
+        var tx = db.transaction(STORE, 'readwrite'), s = tx.objectStore(STORE);
+        s.clear();
+        Object.keys(files).forEach(function (k) { s.put(files[k], k); });
+        tx.oncomplete = res; tx.onerror = function () { rej(tx.error); };
+      });
+    });
+  }
+  function clearAll() {
+    return openDb().then(function (db) {
+      return new Promise(function (res, rej) {
+        var tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).clear();
+        tx.oncomplete = res; tx.onerror = function () { rej(tx.error); };
+      });
+    });
+  }
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = $('msg');
+  function say(t, cls) { msg.textContent = t; msg.className = 'msg ' + (cls || ''); }
+
+  function refresh() {
+    return count().then(function (n) {
+      $('loaded').hidden = !n; $('removeCard').hidden = !n;
+      $('importTitle').textContent = n ? 'Replace your trip file' : 'Import your trip file';
+    });
+  }
+  refresh();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(function () { return navigator.serviceWorker.ready; }).then(function () {
+      $('swState').innerHTML = '<strong>Offline ready.</strong> <span class="mute">The app itself is saved on this phone. After importing your trip file, everything works without signal.</span>';
+    }).catch(function () {
+      $('swState').innerHTML = '<strong class="err">Offline mode is not available in this browser.</strong>';
+    });
+  } else {
+    $('swState').innerHTML = '<strong class="err">This browser cannot save the app for offline use.</strong>';
+  }
+
+  $('open').addEventListener('click', function () { location.href = 'index.html'; });
+
+  $('file').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0]; if (!f) return;
+    say('Reading file...');
+    f.text().then(function (txt) {
+      var data; try { data = JSON.parse(txt); } catch (err) { throw new Error('That file is not a valid trip file.'); }
+      if (!data || data.format !== 'trip-bundle-v1' || !data.files || !data.files['index.html']) throw new Error('That file is not a trip file for this app.');
+      return putAll(data.files);
+    }).then(function () {
+      say('Imported. Opening your trip...', 'ok');
+      return refresh().then(function () {
+        if (navigator.serviceWorker && !navigator.serviceWorker.controller) { say('Imported. Tap "Open my trip" (if it shows this page again, reload once).', 'ok'); return; }
+        setTimeout(function () { location.href = 'index.html'; }, 500);
+      });
+    }).catch(function (err) { say(err.message || 'Import failed.', 'err'); });
+    e.target.value = '';
+  });
+
+  $('remove').addEventListener('click', function () {
+    if (!confirm('Remove the trip from this phone? Your ticked stamps and spending log stay in the app unless you clear site data.')) return;
+    clearAll().then(function () { say('Trip removed.', 'ok'); return refresh(); });
+  });
+})();
+</script>
+</body>
+</html>
